@@ -26,7 +26,6 @@ def login_required(func):
 
     return wrapper
 
-
 NAV_BAR = """
 <div class="nav">
   <a href="javascript:history.back()">⬅ Назад</a>
@@ -59,19 +58,27 @@ HEADER_HTML = """
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
-    body { font-family: sans-serif; margin: 10px; padding: 0; }
+    body { font-family: sans-serif; margin: 10px; padding: 0 10px 70px; /* добавлено нижнее поле */ }
     table { width: 100%; border-collapse: collapse; }
     th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
     tr.unready { background-color: #ffe5e5; }
     tr.ready { background-color: #e5ffe5; }
+    tr.in_repair { background-color: #fffbe5; }
+    tr.waiting_parts { background-color: #fff3e0; }
     select, button { font-size: 1rem; margin: 0.5em 0; }
   </style>
 </head>
 <body>
 """
-
 FOOTER_HTML = "</body></html>"
 
+# Маппинг числовых статусов на человекочитаемые строки
+STATUS_LABELS = {
+    0: "Сломан",
+    1: "Исправен",
+    2: "В ремонте",
+    3: "Ожидает запчастей",
+}
 
 @app.route("/")
 @login_required
@@ -95,34 +102,31 @@ def index():
     models_query += " ORDER BY model"
     models = conn.execute(models_query, model_params).fetchall()
 
-    if firm:
-        if len(models) == 1 and raw_model is None:
-            model = models[0]["model"]
-        elif len(models) > 1 and raw_model is None:
-            model = models[0]["model"]  # <-- добавляем это
-        elif raw_model == "":
-            model = None
-    else:
-        model = None
+    if firm and models and raw_model is None:
+        model = models[0]["model"]
 
+    # Сортировка по приоритету: В ремонте (2), Сломан (0), Ожидает запчастей (3), Исправен (1)
     query = """
         SELECT firm, model, order_number, workable, id_priint
         FROM Print
         WHERE (? IS NULL OR firm = ?) AND (? IS NULL OR model = ?)
-        ORDER BY workable ASC, order_number ASC
+        ORDER BY
+          CASE workable
+            WHEN 2 THEN 0
+            WHEN 0 THEN 1
+            WHEN 3 THEN 2
+            WHEN 1 THEN 3
+          END,
+          order_number ASC
     """
     printers = conn.execute(query, (firm, firm, model, model)).fetchall()
     conn.close()
 
     return render_template_string(
-        HEADER_HTML
-        + """
+        HEADER_HTML + """
     <h1>ФОРМФАКТОР</h1>
 
-    <!-- Обёртка: фирма + кнопки -->
     <div style="display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; margin-bottom: 10px;">
-
-      <!-- Селектор фирмы -->
       <form method="get" id="filter-form" style="margin-right: 20px;">
         <label>Фирма:
           <select name="firm" onchange="this.form.submit()">
@@ -135,21 +139,15 @@ def index():
         <input type="hidden" name="model" id="model-input" value="{{ model or '' }}">
       </form>
 
-      <!-- Кнопки моделей -->
       {% if raw_firm and models %}
       <form method="get" id="model-filter" style="display: flex; flex-wrap: wrap; gap: 5px;">
         <input type="hidden" name="firm" value="{{ raw_firm }}">
         <input type="hidden" name="model" id="model-button-input" value="{{ model or '' }}">
-
         {% for m in models %}
           <button type="button"
                   class="model-toggle"
                   data-model="{{ m.model }}"
-                  style="padding: 5px 10px;
-                        background-color: {% if model == m.model %}#ccc{% else %}#eee{% endif %};
-                        border: 1px solid #999;
-                        border-radius: 6px;
-                        cursor: pointer;">
+                  style="padding: 5px 10px; background-color: {% if model == m.model %}#ccc{% else %}#eee{% endif %}; border: 1px solid #999; border-radius: 6px; cursor: pointer;">
             {{ m.model }}
           </button>
         {% endfor %}
@@ -159,21 +157,18 @@ def index():
 
     <script>
       document.addEventListener('DOMContentLoaded', function () {
-        const buttons = document.querySelectorAll('.model-toggle');
-        const input = document.getElementById('model-button-input');
-        const form = document.getElementById('model-filter');
-
-        buttons.forEach(button => {
+        document.querySelectorAll('.model-toggle').forEach(button => {
+          const input = document.getElementById('model-button-input');
+          const form = document.getElementById('model-filter');
           button.addEventListener('click', () => {
             const clicked = button.dataset.model;
-            const current = input.value;
-
-            input.value = (clicked === current) ? "" : clicked;
+            input.value = (clicked === input.value) ? "" : clicked;
             form.submit();
           });
         });
       });
     </script>
+
     {% if printers %}
     <table>
       <thead>
@@ -181,16 +176,16 @@ def index():
           <th>Фирма</th>
           <th>Модель</th>
           <th>Номер</th>
-          <th>Состояние</th>
+          <th>Статус</th>
         </tr>
       </thead>
       <tbody>
         {% for p in printers %}
-        <tr class="{% if p.workable == 0 %}unready{% else %}ready{% endif %}">
+        <tr class="{% if p.workable == 0 %}unready{% elif p.workable == 1 %}ready{% elif p.workable == 2 %}in_repair{% elif p.workable == 3 %}waiting_parts{% endif %}">
           <td>{{ p.firm }}</td>
           <td>{{ p.model }}</td>
           <td><a href="/requests?printer_id={{ p.id_priint }}">{{ p.order_number }}</a></td>
-          <td style="color: {{ 'red' if p.workable == 0 else 'green' }}">{{ 'Не готов' if p.workable == 0 else 'Готов' }}</td>
+          <td>{{ STATUS_LABELS[p.workable] }}</td>
         </tr>
         {% endfor %}
       </tbody>
@@ -198,17 +193,15 @@ def index():
     {% else %}
     <p>Нет данных для отображения.</p>
     {% endif %}
-    """
-        + NAV_BAR
-        + FOOTER_HTML,
+    """ + NAV_BAR + FOOTER_HTML,
         firms=firms,
         models=models,
         model=model,
         printers=printers,
         raw_firm=raw_firm,
         raw_model=raw_model,
+        STATUS_LABELS=STATUS_LABELS
     )
-
 
 @app.route("/print")
 @login_required
@@ -413,125 +406,157 @@ def register():
     )
 
 
+from flask import request, render_template_string, session
+from werkzeug.utils import secure_filename
+import os, sqlite3
+
+STATUS_LABELS = {
+    0: "Сломан",
+    1: "Исправен",
+    2: "В ремонте",
+    3: "Ожидает запчастей",
+}
+
 @app.route("/create_request", methods=["GET", "POST"])
 @login_required
 def create_request():
     try:
         with get_db_connection() as conn:
-            # Получаем список фирм и моделей из таблицы PrinterModels
             firm_model_pairs = conn.execute(
                 "SELECT firm, model FROM PrinterModels ORDER BY firm, model"
             ).fetchall()
 
             if request.method == "POST":
-                firm = request.form["firm"]
-                model = request.form["model"]
-                action = request.form["action"]
+                firm         = request.form["firm"]
+                model        = request.form["model"]
+                action       = request.form["action"]        # "0","1","2","3" или "none"
                 order_number = request.form["order_number"]
-                serial = request.form["serial"].strip()
-                trouble = request.form["trouble"]
+                serial       = request.form["serial"].strip()
+                trouble      = request.form["trouble"]
 
-                # Добавление фирмы и модели в справочник, если нет
+                # Вставляем новую пару фирма+модель (если нужно)
                 conn.execute(
                     "INSERT OR IGNORE INTO PrinterModels (firm, model) VALUES (?, ?)",
                     (firm, model),
                 )
 
+                # Ищем существующий принтер
                 printer_row = conn.execute(
-                    "SELECT id_priint FROM Print WHERE firm = ? AND model = ? AND order_number = ?",
+                    "SELECT id_priint FROM Print WHERE firm=? AND model=? AND order_number=?",
                     (firm, model, order_number),
                 ).fetchone()
-
                 if not printer_row and serial:
                     printer_row = conn.execute(
-                        "SELECT id_priint FROM Print WHERE serial_number = ?",
+                        "SELECT id_priint FROM Print WHERE serial_number=?",
                         (serial,),
                     ).fetchone()
 
                 if printer_row:
                     printer_id = printer_row["id_priint"]
                 else:
+                    # Создаём новый принтер со статусом "Сломан" (0)
                     conn.execute(
-                        "INSERT INTO Print (firm, model, serial_number, order_number, workable) VALUES (?, ?, ?, ?, 0)",
+                        "INSERT INTO Print (firm, model, serial_number, order_number, workable) "
+                        "VALUES (?, ?, ?, ?, 0)",
                         (firm, model, serial, order_number),
                     )
                     printer_id = conn.execute(
-                        "SELECT id_priint FROM Print WHERE firm = ? AND model = ? AND order_number = ?",
+                        "SELECT id_priint FROM Print WHERE firm=? AND model=? AND order_number=?",
                         (firm, model, order_number),
                     ).fetchone()["id_priint"]
 
-                ready = 1 if action == "return" else 0
+                # Парсим выбранный статус
+                if action == "none":
+                    new_status = None
+                else:
+                    try:
+                        new_status = int(action)
+                        if new_status not in (0, 1, 2, 3):
+                            raise ValueError
+                    except ValueError:
+                        return "Неизвестное действие.", 400
 
+                # Вставляем заявку
                 conn.execute(
-                    "INSERT INTO FixRequest (printer_id, worker_id, trouble, ready, date_in) VALUES (?, ?, ?, ?, datetime('now'))",
-                    (printer_id, session["user_id"], trouble, ready),
+                    "INSERT INTO FixRequest (printer_id, worker_id, trouble, ready, date_in) VALUES "
+                    "(?, ?, ?, ?, datetime('now'))",
+                    (printer_id,
+                     session["user_id"],
+                     trouble,
+                     new_status if new_status is not None else 0,
+                    ),
                 )
 
-                conn.execute(
-                    "UPDATE Print SET workable = ? WHERE id_priint = ?",
-                    (ready, printer_id),
-                )
+                # Обновляем статус принтера, если указано
+                if new_status is not None:
+                    conn.execute(
+                        "UPDATE Print SET workable=? WHERE id_priint=?",
+                        (new_status, printer_id),
+                    )
 
+                # Сохраняем фото, если было загружено
                 if "photo" in request.files:
                     photo = request.files["photo"]
                     if photo.filename:
-                        filename = secure_filename(
-                            f"printer_{printer_id}_{photo.filename}"
-                        )
-                        filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-                        photo.save(filepath)
+                        filename = secure_filename(f"printer_{printer_id}_{photo.filename}")
+                        photo.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
 
-                return "Заявка создана."
+                return redirect(url_for('index'))
 
     except sqlite3.IntegrityError as e:
-        return f"Ошибка целостности данных: {str(e)}"
+        return f"Ошибка целостности данных: {e}", 500
     except sqlite3.OperationalError as e:
-        return f"Ошибка базы данных: {str(e)}"
+        return f"Ошибка базы данных: {e}", 500
 
+    # 🔽 HTML-форма
     return render_template_string(
-        HEADER_HTML
-        + """
-    <form method="POST" enctype="multipart/form-data">
-      <label>Фирма и модель:
-        <select name="firm_model" required>
-          {% for pair in firm_model_pairs %}
-            <option value="{{ pair.firm }}||{{ pair.model }}">{{ pair.firm }} {{ pair.model }}</option>
-          {% endfor %}
-        </select>
-      </label><br>
-      <input type="hidden" name="firm">
-      <input type="hidden" name="model">
-      <script>
-        document.addEventListener('DOMContentLoaded', () => {
-          const select = document.querySelector('select[name="firm_model"]');
-          const firmInput = document.querySelector('input[name="firm"]');
-          const modelInput = document.querySelector('input[name="model"]');
-          const updateHidden = () => {
-            const [firm, model] = select.value.split('||');
-            firmInput.value = firm;
-            modelInput.value = model;
-          };
-          select.addEventListener('change', updateHidden);
-          updateHidden();
-        });
-      </script>
-      <label>Порядковый номер: <input type="number" name="order_number" required></label><br>
-      <label>Серийный номер: <input type="text" name="serial"></label><br>
-      <label>Фото: <input type="file" name="photo" accept="image/*" capture="environment"></label><br>
-      <label>Действие:
-        <select name="action">
-          <option value="repair">Отправлен в ремонт</option>
-          <option value="return">Возвращен из ремонта</option>
-        </select>
-      </label><br>
-      <label>Описание проблемы:<br><textarea name="trouble"></textarea></label><br>
-      <button type="submit">Создать заявку</button>
-    </form>
-    """
-        + NAV_BAR
-        + FOOTER_HTML,
+        HEADER_HTML + """
+<form method="POST" enctype="multipart/form-data">
+  <label>Фирма и модель:
+    <select name="firm_model" required>
+      {% for pair in firm_model_pairs %}
+        <option value="{{pair.firm}}||{{pair.model}}">{{pair.firm}} {{pair.model}}</option>
+      {% endfor %}
+    </select>
+  </label><br>
+  <input type="hidden" name="firm">
+  <input type="hidden" name="model">
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const sel = document.querySelector('select[name="firm_model"]');
+      const iFirm = document.querySelector('input[name="firm"]');
+      const iModel = document.querySelector('input[name="model"]');
+      const upd = () => {
+        const [f,m] = sel.value.split('||');
+        iFirm.value = f; iModel.value = m;
+      };
+      sel.addEventListener('change', upd);
+      upd();
+    });
+  </script>
+
+  <label>Порядковый номер: <input type="number" name="order_number" required></label><br>
+  <label>Серийный номер:   <input type="text"   name="serial"></label><br>
+  <label>Фото:             <input type="file"   name="photo" accept="image/*" capture="environment"></label><br>
+
+  <label>Состояние принтера:
+    <select name="action">
+      <option value="0">Сломан</option>
+      <option value="1">Исправен</option>
+      <option value="2">В ремонте</option>
+      <option value="3">Ожидает запчастей</option>
+      <option value="none">Без изменения</option>
+    </select>
+  </label><br>
+
+  <label>Описание проблемы:<br><textarea name="trouble"></textarea></label><br>
+  <button type="submit">Создать заявку</button>
+</form>
+""" + NAV_BAR + FOOTER_HTML,
         firm_model_pairs=firm_model_pairs,
     )
+
+
 
 
 if __name__ == "__main__":
