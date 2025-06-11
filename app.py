@@ -501,7 +501,7 @@ def create_request():
                         filename = secure_filename(f"printer_{printer_id}_{photo.filename}")
                         photo.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
 
-                return "Заявка создана."
+                return redirect(url_for('index'))
 
     except sqlite3.IntegrityError as e:
         return f"Ошибка целостности данных: {e}", 500
